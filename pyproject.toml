@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genomerge"
+version = "1.0.0"
+description = "Genomic dataset merging, conversion, and QC utility (PLINK, EIGENSTRAT, commercial raw DTC arrays, VCF)"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "d-blueberry" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/d-blueberry/genomerge"
+Repository = "https://github.com/d-blueberry/genomerge"
+
+[project.scripts]
+genomerge = "genomerge.cli:main"
+
+[tool.setuptools]
+packages = ["genomerge"]
