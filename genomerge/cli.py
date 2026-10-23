@@ -505,23 +505,28 @@ def export_eigenstrat(out: str, plink2_exe: str) -> None:
     fam_path = Path(f'{out}.fam')
     if not fam_path.is_file():
         sys.exit(f'ERROR: {fam_path} not found for EIGENSTRAT export')
-    fam_lines = [l for l in fam_path.read_text().splitlines() if l.strip()]
-    new_fam = []
+    fam_lines = [l for l in fam_path.read_text(encoding='utf-8', errors='ignore').splitlines() if l.strip()]
+    sample_metadata = []
+    clean_fam = []
     for line in fam_lines:
         parts = line.split()
-        if len(parts) >= 6:
-            orig_fid = parts[0]
-            if len(parts[1]) > 39:
-                parts[1] = parts[1][:30] + '~' + parts[1][-8:]
-            if len(orig_fid) > 39:
-                orig_fid = orig_fid[:30] + '~' + orig_fid[-8:]
-            parts[5] = orig_fid
-            parts[0] = '0'
-        new_fam.append('\t'.join(parts))
-    fam_path.write_text('\n'.join(new_fam) + '\n')
-    rc = run([plink2_exe, '--bfile', out, '--snps-only', 'just-acgt', '--export', 'eig', 'id-paste=iid', '--out', out])
-    if rc != 0 or not Path(f'{out}.ind').exists():
+        if len(parts) >= 2:
+            fid = parts[0]
+            iid = parts[1]
+            pid = parts[2] if len(parts) > 2 else '0'
+            mid = parts[3] if len(parts) > 3 else '0'
+            raw_sex = parts[4] if len(parts) > 4 else '0'
+            sex = 'M' if raw_sex in ('1', 'M', 'm') else ('F' if raw_sex in ('2', 'F', 'f') else 'U')
+            clean_iid = iid[:30] + '~' + iid[-8:] if len(iid) > 39 else iid
+            clean_pop = fid[:30] + '~' + fid[-8:] if len(fid) > 39 else fid
+            sample_metadata.append((clean_iid, sex, clean_pop))
+            clean_fam.append(f"0\t{clean_iid}\t{pid}\t{mid}\t{raw_sex if raw_sex in ('1', '2') else '0'}\t-9")
+    fam_path.write_text('\n'.join(clean_fam) + '\n', encoding='utf-8')
+    rc = run([plink2_exe, '--bfile', out, '--no-categorical', '--snps-only', 'just-acgt', '--export', 'eig', 'id-paste=iid', '--out', out])
+    if rc != 0 or not Path(f'{out}.geno').exists():
         sys.exit(f'ERROR: eigenstrat export failed for {out}')
+    ind_lines = [f'{s_iid}\t{s_sex}\t{s_pop}' for s_iid, s_sex, s_pop in sample_metadata]
+    Path(f'{out}.ind').write_text('\n'.join(ind_lines) + '\n', encoding='utf-8')
     logging.info(f'Generated {out}.geno/.snp/.ind natively with valid EIGENSTRAT hash.')
 
 def format_plink_fam(fam_path: Path) -> None:
@@ -880,6 +885,47 @@ def apply_ld_pruning(bfile_prefix: str, out_prefix: str, plink_exe: str, window:
         logging.warning('Failed to extract LD pruned SNPs; proceeding with unpruned data.')
         return (bfile_prefix, False)
 
+def apply_variant_filters(bfile_prefix: str, out_prefix: str, plink_exe: str, extract_file: str | None=None, exclude_file: str | None=None) -> tuple[str, bool]:
+    if not extract_file and not exclude_file:
+        return (bfile_prefix, False)
+    curr_pfx = bfile_prefix
+    is_temp = False
+    if extract_file:
+        p_ext = Path(extract_file)
+        if not p_ext.is_file():
+            sys.exit(f"ERROR: --extract file '{extract_file}' not found")
+        ext_out = f'{out_prefix}_extracted'
+        rc = run([plink_exe, '--bfile', curr_pfx, '--extract', str(p_ext), '--allow-no-sex', '--make-bed', '--out', ext_out], quiet_fail=True)
+        if rc == 0 and Path(f'{ext_out}.bed').exists():
+            if is_temp:
+                for ext in ('.bed', '.bim', '.fam', '.log', '.nosex'):
+                    Path(f'{curr_pfx}{ext}').unlink(missing_ok=True)
+            curr_pfx = ext_out
+            is_temp = True
+            n_s, n_v = get_dataset_counts(curr_pfx)
+            ui_ok(f"Extracted variants matching '{p_ext.name}' -> {n_v:,} variants remaining")
+            logging.info(f"Applied --extract with '{extract_file}': {n_v:,} variants retained")
+        else:
+            logging.warning(f"Failed to apply --extract with '{extract_file}'; proceeding without it.")
+    if exclude_file:
+        p_exc = Path(exclude_file)
+        if not p_exc.is_file():
+            sys.exit(f"ERROR: --exclude file '{exclude_file}' not found")
+        exc_out = f'{out_prefix}_excluded'
+        rc = run([plink_exe, '--bfile', curr_pfx, '--exclude', str(p_exc), '--allow-no-sex', '--make-bed', '--out', exc_out], quiet_fail=True)
+        if rc == 0 and Path(f'{exc_out}.bed').exists():
+            if is_temp:
+                for ext in ('.bed', '.bim', '.fam', '.log', '.nosex'):
+                    Path(f'{curr_pfx}{ext}').unlink(missing_ok=True)
+            curr_pfx = exc_out
+            is_temp = True
+            n_s, n_v = get_dataset_counts(curr_pfx)
+            ui_ok(f"Excluded variants matching '{p_exc.name}' -> {n_v:,} variants remaining")
+            logging.info(f"Applied --exclude with '{exclude_file}': {n_v:,} variants retained")
+        else:
+            logging.warning(f"Failed to apply --exclude with '{exclude_file}'; proceeding without it.")
+    return (curr_pfx, is_temp)
+
 def normalize_ref_to_plink(ref_raw: str, out_prefix: str, plink2_exe: str) -> tuple[str, bool]:
     fmt_a = detect_format(ref_raw)
     if fmt_a == 'error':
@@ -989,7 +1035,7 @@ def normalize_subject_to_plink(sub_raw: str, format_hint: str | None, out_prefix
             return (subset_prefix, True)
     return (converted, is_temp)
 
-def run_convert_pipeline(datasets: list[str], out_prefixes: list[str] | None, to_plink: bool, to_eig: bool, chr_filter: str | None, target_fids: set[str], target_iids: set[str], king_cutoff: float | None, default_fid: str | None, default_iid: str | None, sex: int, plink_exe: str, plink2_exe: str, geno: float | None=None, mind: float | None=None, maf: float | None=None, mac: int | None=None, exclude_high_ld: bool=False, ld_params: tuple[int, int, float] | None=None) -> None:
+def run_convert_pipeline(datasets: list[str], out_prefixes: list[str] | None, to_plink: bool, to_eig: bool, chr_filter: str | None, target_fids: set[str], target_iids: set[str], king_cutoff: float | None, default_fid: str | None, default_iid: str | None, sex: int, plink_exe: str, plink2_exe: str, geno: float | None=None, mind: float | None=None, maf: float | None=None, mac: int | None=None, exclude_high_ld: bool=False, ld_params: tuple[int, int, float] | None=None, extract_snps: str | None=None, exclude_snps: str | None=None) -> None:
     if to_plink and to_eig:
         sys.exit('ERROR: Cannot specify both --plink and --eig for conversion. Choose one target format.')
     total_ds = len(datasets)
@@ -1112,6 +1158,15 @@ def run_convert_pipeline(datasets: list[str], out_prefixes: list[str] | None, to
                         Path(f'{plink_pfx}{ext}').unlink(missing_ok=True)
                 plink_pfx = curr_ld
                 is_temp = True
+        if extract_snps or exclude_snps:
+            curr_vf, vf_temp = apply_variant_filters(bfile_prefix=plink_pfx, out_prefix=f'{out_pfx}_snps', plink_exe=plink_exe, extract_file=extract_snps, exclude_file=exclude_snps)
+            if vf_temp:
+                temp_prefixes.append(curr_vf)
+                if is_temp:
+                    for ext in ('.bed', '.bim', '.fam', '.log', '.nosex'):
+                        Path(f'{plink_pfx}{ext}').unlink(missing_ok=True)
+                plink_pfx = curr_vf
+                is_temp = True
         if target_fmt == 'plink':
             if plink_pfx != out_pfx:
                 for ext in ('.bed', '.bim', '.fam'):
@@ -1158,6 +1213,8 @@ def main() -> None:
     parser.add_argument('--mac', type=int, default=None, help='Filter out variants with MAC < threshold (e.g. 2)')
     parser.add_argument('--geno', type=float, default=None, help='Filter out variants with missing rate > threshold (e.g. 0.10)')
     parser.add_argument('--mind', type=float, default=None, help='Filter out samples with missing rate > threshold (e.g. 0.20)')
+    parser.add_argument('--extract', dest='extract_snps', default=None, metavar='FILE', help='Extract variants listed in a PLINK .snplist / text file (one variant ID per line)')
+    parser.add_argument('--exclude', dest='exclude_snps', default=None, metavar='FILE', help='Exclude variants listed in a PLINK .snplist / text file (one variant ID per line)')
     parser.add_argument('--ref', required=False, default=None, help='Reference dataset prefix (PLINK or EIGENSTRAT)')
     parser.add_argument('--sub', nargs='*', default=None, help='Subject dataset prefix(es)')
     parser.add_argument('--convert', nargs='+', default=None, help='Convert one or more datasets to PLINK binary or EIGENSTRAT without merging')
@@ -1185,6 +1242,10 @@ def main() -> None:
     parser.add_argument('--king-sub', dest='king_sub', type=float, nargs='?', const=0.354, default=None, help='Filter subject dataset(s) using KING kinship cutoff before merging (default: 0.354)')
     parser.add_argument('--king-all', dest='king_all', type=float, nargs='?', const=0.354, default=None, help='Apply KING kinship cutoff to reference, subjects, and merged dataset (default: 0.354)')
     args = parser.parse_args()
+    if args.extract_snps and not Path(args.extract_snps).is_file():
+        sys.exit(f"ERROR: --extract file '{args.extract_snps}' not found")
+    if args.exclude_snps and not Path(args.exclude_snps).is_file():
+        sys.exit(f"ERROR: --exclude file '{args.exclude_snps}' not found")
     script_dir = Path(__file__).resolve().parent
     if args.check_tools:
         ok = check_tools(script_dir)
@@ -1226,7 +1287,7 @@ def main() -> None:
         setup_logging(log_out, to_file=True, verbose=args.verbose)
         logging.info(f'plink:  {plink_exe}')
         logging.info(f'plink2: {plink2_exe}')
-        run_convert_pipeline(datasets=args.convert, out_prefixes=args.out, to_plink=args.plink, to_eig=args.eig, chr_filter=chr_filter, target_fids=ref_target_fids | load_id_list(args.keep_sub_pop), target_iids=ref_target_iids | load_id_list(args.keep_sub_ind), king_cutoff=king_cutoff, default_fid=args.sub_pop, default_iid=args.sub_id, sex=args.sub_sex, plink_exe=plink_exe, plink2_exe=plink2_exe, geno=args.geno, mind=args.mind, maf=args.maf, mac=args.mac, exclude_high_ld=args.exclude_high_ld, ld_params=ld_params)
+        run_convert_pipeline(datasets=args.convert, out_prefixes=args.out, to_plink=args.plink, to_eig=args.eig, chr_filter=chr_filter, target_fids=ref_target_fids | load_id_list(args.keep_sub_pop), target_iids=ref_target_iids | load_id_list(args.keep_sub_ind), king_cutoff=king_cutoff, default_fid=args.sub_pop, default_iid=args.sub_id, sex=args.sub_sex, plink_exe=plink_exe, plink2_exe=plink2_exe, geno=args.geno, mind=args.mind, maf=args.maf, mac=args.mac, exclude_high_ld=args.exclude_high_ld, ld_params=ld_params, extract_snps=args.extract_snps, exclude_snps=args.exclude_snps)
         return
     if not args.ref:
         parser.error('the following arguments are required: --ref (or use --convert for standalone dataset conversion)')
@@ -1483,6 +1544,13 @@ def main() -> None:
         ld_w, ld_s, ld_r = ld_params
         curr_ref, ld_temp = apply_ld_pruning(bfile_prefix=curr_ref, out_prefix=f'{args.out}_merged_ld', plink_exe=plink_exe, window=ld_w, step=ld_s, r2=ld_r)
         if ld_temp:
+            temp_prefixes.append(curr_ref)
+            for ext in ('.bed', '.bim', '.fam'):
+                shutil.copy2(f'{curr_ref}{ext}', f'{args.out}{ext}')
+            curr_ref = args.out
+    if args.extract_snps or args.exclude_snps:
+        curr_ref, vf_temp = apply_variant_filters(bfile_prefix=curr_ref, out_prefix=f'{args.out}_merged_snps', plink_exe=plink_exe, extract_file=args.extract_snps, exclude_file=args.exclude_snps)
+        if vf_temp:
             temp_prefixes.append(curr_ref)
             for ext in ('.bed', '.bim', '.fam'):
                 shutil.copy2(f'{curr_ref}{ext}', f'{args.out}{ext}')

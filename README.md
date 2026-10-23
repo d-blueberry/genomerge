@@ -72,6 +72,10 @@ genomerge --ref Data_Ref --sub Data1 --exclude-high-ld --out merged
 # QC filters (MAF, missingness)
 genomerge --ref Data_Ref --sub Data1 --maf 0.01 --geno 0.10 --out merged
 
+# Extract / exclude specific SNPs from .snplist file
+genomerge --ref Data_Ref --sub Data1 --extract snps_to_keep.snplist --out merged
+genomerge --ref Data_Ref --sub Data1 --exclude bad_snps.snplist --out merged
+
 # Dry run check
 genomerge --ref Data_Ref --sub Data1 --check
 ```
@@ -116,6 +120,8 @@ genomerge --convert Data1 --plink --autosome --ld-2 --out Data1_clean
 | `--mac` | Filter by minor allele count |
 | `--geno` | Filter variants by missing rate |
 | `--mind` | Filter samples by missing rate |
+| `--extract` | Extract variants from PLINK .snplist file |
+| `--exclude` | Exclude variants from PLINK .snplist file |
 | `--keep-pop` | Populations to keep |
 | `--keep-ind` | Individuals to keep |
 | `--check` | Dry run validation |
