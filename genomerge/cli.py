@@ -179,7 +179,7 @@ def is_raw_dtc_file(path: Path) -> bool:
     try:
         with open_raw_file(p) as fh:
             for i, line in enumerate(fh):
-                if i > 200:
+                if i > 2500:
                     break
                 line_l = line.lower()
                 if any((tag in line_l for tag in ('23andme', 'ancestrydna', 'myheritage', 'familytreedna', 'living dna'))):
@@ -187,10 +187,14 @@ def is_raw_dtc_file(path: Path) -> bool:
                 if line.startswith('#') or not line.strip():
                     continue
                 parts = [p.strip().strip('"\'') for p in (line.split(',') if ',' in line else line.split())]
-                if not parts or parts[0].upper() in ('RSID', 'SNP', 'ID'):
+                if not parts:
+                    continue
+                if len(parts) in (4, 5) and parts[0].upper() in ('RSID', 'SNP', 'ID', 'NAME') and any((h in parts[1].upper() for h in ('CHROMOSOME', 'CHR'))):
+                    return True
+                if parts[0].upper() in ('RSID', 'SNP', 'ID', 'NAME'):
                     continue
                 chrom = parts[1].upper().removeprefix('CHR')
-                if len(parts) in (4, 5) and parts[0].startswith(('rs', 'i', 'vg', 'kg')) and (chrom in chr_keys):
+                if len(parts) in (4, 5) and (parts[0].startswith(('rs', 'i', 'vg', 'kg')) or len(parts) >= 4) and (chrom in chr_keys):
                     return True
     except Exception:
         return False
